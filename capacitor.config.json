@@ -1,0 +1,16 @@
+{
+  "appId": "app.lovable.6b7aa35c7b774bc2b7ce48f5e6aa6330",
+  "appName": "vocal-cart-wizard",
+  "webDir": "dist",
+  "server": {
+    "url": "https://6b7aa35c-7b77-4bc2-b7ce-48f5e6aa6330.lovableproject.com?forceHideBadge=true",
+    "cleartext": true
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchShowDuration": 2000,
+      "backgroundColor": "#ffffff",
+      "showSpinner": false
+    }
+  }
+}
