@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { VoiceButton } from '@/components/VoiceButton';
 import { VoiceVisualizer } from '@/components/VoiceVisualizer';
 import { VoiceSearchResults } from '@/components/VoiceSearchResults';
@@ -17,7 +17,7 @@ import { getTranslationForLanguage } from '@/utils/translations';
 import { ShoppingItem, ItemCategory, SmartSuggestion, SearchResult, VoiceCommand } from '@/types/shopping';
 import { LanguageConfig } from '@/types/languages';
 import { useToast } from '@/hooks/use-toast';
-import { Trash2, RefreshCw, Mic, ShoppingCart, Search, Sparkles, Plus, Globe } from 'lucide-react';
+import { Trash2, RefreshCw, Mic, ShoppingCart, Search, Sparkles, Plus, Globe, AlertCircle } from 'lucide-react';
 
 export const VoiceShoppingAssistant = () => {
   const [items, setItems] = useState<ShoppingItem[]>([]);
@@ -27,12 +27,16 @@ export const VoiceShoppingAssistant = () => {
   const [currentSearchQuery, setCurrentSearchQuery] = useState('');
   const [lastCommand, setLastCommand] = useState('');
   const [isSearching, setIsSearching] = useState(false);
+  const [lastError, setLastError] = useState<string | null>(null);
   
   const { currentLanguage, changeLanguage, isLoading: isLanguageLoading } = useLanguage();
   const { toast } = useToast();
 
   // Get translations for current language
-  const translations = getTranslationForLanguage(currentLanguage);
+  const translations = useMemo(() => 
+    getTranslationForLanguage(currentLanguage), 
+    [currentLanguage]
+  );
 
   // Update suggestions when items change
   useEffect(() => {
@@ -40,14 +44,16 @@ export const VoiceShoppingAssistant = () => {
     setSuggestions(newSuggestions);
   }, [items]);
 
-  // Group items by category
-  const itemsByCategory = items.reduce((acc, item) => {
-    if (!acc[item.category]) {
-      acc[item.category] = [];
-    }
-    acc[item.category].push(item);
-    return acc;
-  }, {} as Record<ItemCategory, ShoppingItem[]>);
+  // Group items by category with memoization
+  const itemsByCategory = useMemo(() => {
+    return items.reduce((acc, item) => {
+      if (!acc[item.category]) {
+        acc[item.category] = [];
+      }
+      acc[item.category].push(item);
+      return acc;
+    }, {} as Record<ItemCategory, ShoppingItem[]>);
+  }, [items]);
 
   const categories: ItemCategory[] = [
     'produce', 'dairy', 'meat', 'pantry', 'frozen', 
@@ -58,18 +64,23 @@ export const VoiceShoppingAssistant = () => {
     if (result.isFinal) {
       const command = parseVoiceCommand(result.transcript, currentLanguage);
       setLastCommand(result.transcript);
+      setLastError(null); // Clear previous errors
       
       if (command) {
         executeCommand(command).catch(error => {
           console.error('Command execution error:', error);
+          const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+          setLastError(errorMessage);
           toast({
             title: translations.commandFailed,
-            description: "Unable to execute voice command. Please try again.",
+            description: errorMessage,
             variant: "destructive"
           });
         });
         setCurrentTranscript('');
       } else {
+        const errorMsg = `Command not recognized: "${result.transcript}"`;
+        setLastError(errorMsg);
         toast({
           title: translations.commandNotRecognized,
           description: `Try '${translations.examples.add[0]}', '${translations.examples.search[0]}', or '${translations.examples.manage[0]}'`,
@@ -82,6 +93,7 @@ export const VoiceShoppingAssistant = () => {
   }, [currentLanguage, toast, translations]);
 
   const handleVoiceError = useCallback((error: string) => {
+    setLastError(error);
     toast({
       title: translations.voiceRecognitionError,
       description: error,
@@ -92,12 +104,17 @@ export const VoiceShoppingAssistant = () => {
   const {
     isListening,
     isSupported,
-    toggleListening
+    toggleListening,
+    resetRecognition,
+    errorHistory,
+    retryCount,
+    maxRetries
   } = useSpeechRecognition({
     onResult: handleVoiceResult,
     onError: handleVoiceError,
     continuous: true,
-    language: currentLanguage
+    language: currentLanguage,
+    maxRetries: 3
   });
 
   const handleLanguageChange = (newLanguage: LanguageConfig) => {
@@ -106,95 +123,95 @@ export const VoiceShoppingAssistant = () => {
   };
 
   const executeCommand = async (command: VoiceCommand) => {
-    switch (command.action) {
-      case 'add': {
-        const newItem: ShoppingItem = {
-          id: Date.now().toString(),
-          name: command.item,
-          quantity: command.quantity || 1,
-          category: command.category || 'other',
-          completed: false,
-          brand: command.brand,
-          size: command.size,
-          addedAt: new Date()
-        };
-        setItems(prev => [...prev, newItem]);
-        toast({
-          title: "Item added",
-          description: `Added ${command.quantity || 1} ${command.item} to your list`,
-        });
-        break;
+    try {
+      switch (command.action) {
+        case 'add': {
+          const newItem: ShoppingItem = {
+            id: Date.now().toString(),
+            name: command.item,
+            quantity: command.quantity || 1,
+            category: command.category || 'other',
+            completed: false,
+            brand: command.brand,
+            size: command.size,
+            addedAt: new Date()
+          };
+          setItems(prev => [...prev, newItem]);
+          toast({
+            title: "Item added",
+            description: `Added ${command.quantity || 1} ${command.item} to your list`,
+          });
+          break;
+        }
+
+        case 'remove':
+          setItems(prev => prev.filter(item => 
+            !item.name.toLowerCase().includes(command.item.toLowerCase())
+          ));
+          toast({
+            title: "Item removed",
+            description: `Removed ${command.item} from your list`,
+          });
+          break;
+
+        case 'complete':
+          setItems(prev => prev.map(item => 
+            item.name.toLowerCase().includes(command.item.toLowerCase())
+              ? { ...item, completed: !item.completed }
+              : item
+          ));
+          toast({
+            title: "Item updated",
+            description: `Updated ${command.item} status`,
+          });
+          break;
+
+        case 'search':
+          if (command.searchQuery) {
+            setIsSearching(true);
+            setCurrentSearchQuery(command.searchQuery);
+            try {
+              const results = await searchProducts(command.searchQuery);
+              setSearchResults(results);
+            } catch (error) {
+              console.error('Search error:', error);
+              throw new Error('Unable to search for products');
+            } finally {
+              setIsSearching(false);
+            }
+          }
+          break;
+
+        case 'filter':
+          if (command.searchQuery) {
+            setIsSearching(true);
+            setCurrentSearchQuery(command.searchQuery);
+            try {
+              const results = await searchProducts(command.searchQuery, { priceRange: command.priceRange });
+              setSearchResults(results);
+            } catch (error) {
+              console.error('Filter error:', error);
+              throw new Error('Unable to filter products');
+            } finally {
+              setIsSearching(false);
+            }
+          }
+          break;
+
+        case 'clear':
+          setItems([]);
+          toast({
+            title: "List cleared",
+            description: "All items removed from your list",
+          });
+          break;
+
+        default:
+          throw new Error(`Unknown command action: ${command.action}`);
       }
-
-      case 'remove':
-        setItems(prev => prev.filter(item => 
-          !item.name.toLowerCase().includes(command.item.toLowerCase())
-        ));
-        toast({
-          title: "Item removed",
-          description: `Removed ${command.item} from your list`,
-        });
-        break;
-
-      case 'complete':
-        setItems(prev => prev.map(item => 
-          item.name.toLowerCase().includes(command.item.toLowerCase())
-            ? { ...item, completed: !item.completed }
-            : item
-        ));
-        toast({
-          title: "Item updated",
-          description: `Updated ${command.item} status`,
-        });
-        break;
-
-      case 'search':
-        if (command.searchQuery) {
-          setIsSearching(true);
-          setCurrentSearchQuery(command.searchQuery);
-          try {
-            const results = await searchProducts(command.searchQuery);
-            setSearchResults(results);
-          } catch (error) {
-            console.error('Search error:', error);
-            toast({
-              title: "Search failed",
-              description: "Unable to search for products",
-              variant: "destructive"
-            });
-          } finally {
-            setIsSearching(false);
-          }
-        }
-        break;
-
-      case 'filter':
-        if (command.searchQuery) {
-          setIsSearching(true);
-          setCurrentSearchQuery(command.searchQuery);
-          try {
-            const results = await searchProducts(command.searchQuery, { priceRange: command.priceRange });
-            setSearchResults(results);
-          } catch (error) {
-            console.error('Filter error:', error);
-            toast({
-              title: "Filter failed",
-              description: "Unable to filter products",
-              variant: "destructive"
-            });
-          } finally {
-            setIsSearching(false);
-          }
-        }
-        break;
-
-      case 'clear':
-        setItems([]);
-        toast({
-          title: "List cleared",
-          description: "All items removed from your list",
-        });
-        break;
+    } catch (error) {
+      console.error('Command execution failed:', error);
+      throw error;
     }
   };
 
@@ -255,6 +272,15 @@ export const VoiceShoppingAssistant = () => {
     });
   };
 
+  const handleRetryRecognition = () => {
+    resetRecognition();
+    setLastError(null);
+    toast({
+      title: "Voice recognition reset",
+      description: "Voice recognition has been reset. Please try again.",
+    });
+  };
+
   // Show loading state while language is being initialized
   if (isLanguageLoading) {
     return (
@@ -292,6 +318,38 @@ export const VoiceShoppingAssistant = () => {
           </div>
         </div>
 
+        {/* Error Display */}
+        {lastError && (
+          <Card className="p-4 border-red-200 bg-red-50">
+            <div className="flex items-start gap-3">
+              <AlertCircle className="h-5 w-5 text-red-600 mt-0.5 flex-shrink-0" />
+              <div className="flex-1">
+                <h3 className="font-medium text-red-800 mb-1">Voice Command Error</h3>
+                <p className="text-sm text-red-700 mb-2">{lastError}</p>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleRetryRecognition}
+                    className="text-red-700 border-red-300 hover:bg-red-100"
+                  >
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                    Reset Recognition
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setLastError(null)}
+                    className="text-red-700 border-red-300 hover:bg-red-100"
+                  >
+                    Dismiss
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </Card>
+        )}
+
         {/* Voice Control Section */}
         <Card className="p-6 card-shadow">
           <div className="flex flex-col lg:flex-row gap-6">
@@ -304,6 +362,7 @@ export const VoiceShoppingAssistant = () => {
                   onToggle={toggleListening}
                   size="lg"
                   translations={translations}
+                  disabled={!isSupported || errorHistory.length >= maxRetries}
                 />
               </div>
               
@@ -311,6 +370,7 @@ export const VoiceShoppingAssistant = () => {
                 isListening={isListening}
                 transcript={currentTranscript}
                 translations={translations}
+                confidence={lastCommand ? 0.85 : undefined} // Mock confidence for demo
               />
             </div>
 
